@@ -1,0 +1,40 @@
+name: build-action-feedback-service
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'banking-ai-demo/services/action-feedback-service/**'
+      - '.github/workflows/action-feedback-service.yml'
+  workflow_dispatch: {}
+
+env:
+  SERVICE: action-feedback-service
+  REGISTRY: vcr.vngcloud.vn
+  IMAGE_REPO: vcr.vngcloud.vn/114544-ea-hackathon/action-feedback-service
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to VNG Container Registry (vCR)
+        uses: docker/login-action@v3
+        with:
+          registry: vcr.vngcloud.vn
+          username: ${{ secrets.VCR_USERNAME }}
+          password: ${{ secrets.VCR_PASSWORD }}
+
+      - name: Build and push image (tag = commit SHA)
+        uses: docker/build-push-action@v6
+        with:
+          context: banking-ai-demo/services/action-feedback-service
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ github.sha }}
+            ${{ env.IMAGE_REPO }}:latest

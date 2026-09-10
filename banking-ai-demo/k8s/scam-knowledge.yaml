@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scam-knowledge-service
+  namespace: finance-demo
+  labels:
+    app: scam-knowledge-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scam-knowledge-service
+  template:
+    metadata:
+      labels:
+        app: scam-knowledge-service
+    spec:
+      imagePullSecrets:
+        - name: vcr-cred
+      containers:
+        - name: scam-knowledge-service
+          # CI thay :latest bằng commit SHA (xem README).
+          image: vcr.vngcloud.vn/114544-ea-hackathon/scam-knowledge-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scam-knowledge-service
+  namespace: finance-demo
+  labels:
+    app: scam-knowledge-service
+spec:
+  type: ClusterIP
+  selector:
+    app: scam-knowledge-service
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
