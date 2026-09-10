@@ -153,20 +153,40 @@ kubectl -n finance-demo set image \
   customer-profile-service=vcr.vngcloud.vn/114544-ea-hackathon/customer-profile-service:$GITHUB_SHA
 ```
 
-## CI/CD (GitHub Actions → VNG Container Registry / vCR)
+## CI/CD (GitHub Actions → vCR → VKS)
 
-Mỗi service có 1 workflow trong `<repo-root>/.github/workflows/<service>.yml`, chỉ chạy khi folder service đó thay đổi — path filter là `banking-ai-demo/services/<name>/**`. Workflow sẽ:
+Mỗi service có 1 workflow trong `<repo-root>/.github/workflows/<service>.yml`, chỉ chạy khi folder service đó thay đổi — path filter là `banking-ai-demo/services/<name>/**`. Mỗi workflow gồm 2 job:
 
+**Job `build-and-push`:**
 1. Đăng nhập vCR tại host `vcr.vngcloud.vn`.
 2. Build Docker image.
 3. Push vào project `114544-ea-hackathon` với **2 tag**: `:<commit SHA>` (chính) và `:latest`.
 
-Host (`vcr.vngcloud.vn`) và project (`114544-ea-hackathon`) để thẳng trong workflow/manifest (không phải secret). Chỉ **credentials** đưa vào GitHub Secrets (Settings → Secrets and variables → Actions):
+**Job `deploy`** (chạy sau khi build xong):
+1. Ghi kubeconfig từ secret `KUBE_CONFIG` (base64).
+2. Đảm bảo `imagePullSecret` `vcr-cred` trong namespace `finance-demo`.
+3. Apply manifest với image đã gắn đúng commit SHA rồi `kubectl rollout status` chờ deploy xong.
+
+Host (`vcr.vngcloud.vn`), project (`114544-ea-hackathon`), namespace (`finance-demo`) để thẳng trong workflow/manifest (không phải secret). Chỉ **credentials** đưa vào GitHub Secrets (Settings → Secrets and variables → Actions):
 
 | Secret | Ý nghĩa |
 |---|---|
 | `VCR_USERNAME` | Username / access key đăng nhập vCR |
 | `VCR_PASSWORD` | Password / secret key vCR |
+| `KUBE_CONFIG` | Kubeconfig VKS **đã base64** (xem dưới) — dùng để deploy |
+
+Tạo secret `KUBE_CONFIG` từ file kubeconfig tải về từ VNG Cloud:
+
+```bash
+# macOS/Linux — copy chuỗi base64 rồi dán vào GitHub secret KUBE_CONFIG
+base64 -i ~/.kube/vks-finance-demo.yaml | pbcopy      # macOS
+base64 -w0 ~/.kube/vks-finance-demo.yaml              # Linux (in ra stdout)
+
+# hoặc set thẳng bằng gh CLI:
+gh secret set KUBE_CONFIG < <(base64 -w0 ~/.kube/vks-finance-demo.yaml)
+```
+
+> Kubeconfig chứa credential truy cập cluster → **không commit vào repo** (đã có trong `.gitignore`). Job `deploy` giả định namespace `finance-demo` đã tồn tại (bạn đã tạo sẵn).
 
 Image path đầy đủ: `vcr.vngcloud.vn/114544-ea-hackathon/<service>:<commit SHA>`.
 

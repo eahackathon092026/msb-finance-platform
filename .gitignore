@@ -9,6 +9,13 @@ __pycache__/
 venv/
 *.egg-info/
 
+# Kubeconfig / cluster credentials — NEVER commit
+*.kubeconfig
+kubeconfig
+kubeconfig*.yaml
+.kube/
+*vks*config*
+
 # IDE
 .idea/
 .vscode/

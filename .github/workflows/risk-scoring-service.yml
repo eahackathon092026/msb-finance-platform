@@ -9,9 +9,12 @@ on:
   workflow_dispatch: {}
 
 env:
+  # Host registry, project, namespace để công khai; credentials (VCR_*, KUBE_CONFIG) lấy từ GitHub Secrets — KHÔNG hardcode.
   SERVICE: risk-scoring-service
   REGISTRY: vcr.vngcloud.vn
   IMAGE_REPO: vcr.vngcloud.vn/114544-ea-hackathon/risk-scoring-service
+  NAMESPACE: finance-demo
+  MANIFEST: banking-ai-demo/k8s/risk-scoring.yaml
 
 jobs:
   build-and-push:
@@ -38,3 +41,33 @@ jobs:
           tags: |
             ${{ env.IMAGE_REPO }}:${{ github.sha }}
             ${{ env.IMAGE_REPO }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Write kubeconfig from secret (base64)
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Ensure imagePullSecret vcr-cred
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" create secret docker-registry vcr-cred \
+            --docker-server="${{ env.REGISTRY }}" \
+            --docker-username='${{ secrets.VCR_USERNAME }}' \
+            --docker-password='${{ secrets.VCR_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy image (commit SHA) to VKS
+        run: |
+          sed "s#:latest#:${{ github.sha }}#" "${{ env.MANIFEST }}" \
+            | kubectl -n "${{ env.NAMESPACE }}" apply -f -
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/${{ env.SERVICE }} --timeout=120s
