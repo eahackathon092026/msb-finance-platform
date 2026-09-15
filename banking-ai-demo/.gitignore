@@ -1,3 +1,9 @@
+# Biến môi trường — chứa chuỗi kết nối database kèm mật khẩu.
+# .env.example là bản mẫu có placeholder và ĐƯỢC commit; .env thì không.
+.env
+.env.*
+!.env.example
+
 __pycache__/
 *.pyc
 .pytest_cache/
