@@ -10,11 +10,16 @@ venv/
 *.egg-info/
 
 # Kubeconfig / cluster credentials — NEVER commit
+# VNG Cloud tải kubeconfig về dưới tên cluster-<id>.txt nên các mẫu theo đuôi
+# .yaml/.kubeconfig không bắt được; chặn thẳng theo tên file VNG sinh ra.
 *.kubeconfig
 kubeconfig
 kubeconfig*.yaml
 .kube/
 *vks*config*
+cluster-*.txt
+cluster-*.yaml
+**/cluster-*.txt
 
 # IDE
 .idea/
