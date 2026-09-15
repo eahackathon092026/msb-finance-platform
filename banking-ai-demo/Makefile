@@ -14,11 +14,24 @@ REGISTRY_HOST ?= vcr.vngcloud.vn
 NAMESPACE ?= finance-demo
 PULL_SECRET ?= vcr-cred
 
+
+# psql không phải lúc nào cũng có sẵn, nhưng máy build được image thì luôn có
+# docker. PSQL tự chọn psql cục bộ nếu có, không thì chạy qua container.
+# --network=host để container nối được tới database bên ngoài.
+PSQL_IMAGE ?= postgres:16-alpine
+PSQL := $(shell command -v psql 2>/dev/null)
+ifeq ($(PSQL),)
+  PSQL_RUN = docker run --rm -i --network=host -e PGPASSWORD \
+             $(PSQL_IMAGE) psql
+else
+  PSQL_RUN = psql
+endif
+
 SCHEMA := ../msb_guardian_schema.sql
 SEED   := db/seed.sql
 
 .PHONY: help test build run sync-common k8s-apply k8s-secret k8s-db-secret \
-        db-init db-seed db-reset db-gen-seed db-test dev-up dev-down
+        db-init db-seed db-reset db-gen-seed db-test db-ping db-status dev-up dev-down
 
 help:
 	@echo "Phát triển"
@@ -29,6 +42,8 @@ help:
 	@echo "  make dev-down     - xóa Postgres dev"
 	@echo ""
 	@echo "Database  (cần DATABASE_URL)"
+	@echo "  make db-ping      - thử kết nối (chạy cái này TRƯỚC TIÊN)"
+	@echo "  make db-status    - xem database đã có schema và dữ liệu chưa"
 	@echo "  make db-init      - nạp schema 18 bảng"
 	@echo "  make db-gen-seed  - sinh lại db/seed.sql từ generator"
 	@echo "  make db-seed      - nạp dữ liệu mẫu 10 khách hàng"
@@ -67,7 +82,7 @@ run: sync-common
 # --- Database ---------------------------------------------------------------
 db-init:
 	@test -n "$(DATABASE_URL)" || { echo "ERROR: chưa đặt DATABASE_URL"; exit 1; }
-	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f $(SCHEMA)
+	$(PSQL_RUN) "$(DATABASE_URL)" -v ON_ERROR_STOP=1 < $(SCHEMA)
 	@echo "Đã nạp schema."
 
 db-gen-seed:
@@ -76,8 +91,29 @@ db-gen-seed:
 
 db-seed:
 	@test -n "$(DATABASE_URL)" || { echo "ERROR: chưa đặt DATABASE_URL"; exit 1; }
-	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f $(SEED)
+	$(PSQL_RUN) "$(DATABASE_URL)" -v ON_ERROR_STOP=1 < $(SEED)
 	@echo "Đã nạp dữ liệu mẫu."
+
+db-ping:
+	@test -n "$(DATABASE_URL)" || { echo "ERROR: chưa đặt DATABASE_URL"; exit 1; }
+	@echo "Đang thử kết nối..."
+	@$(PSQL_RUN) "$(DATABASE_URL)" -tAc \
+		"SELECT 'Kết nối OK · ' || current_database() || ' · ' || version()" \
+		|| { echo ""; echo "Không kết nối được. Kiểm tra host, cổng, mật khẩu và sslmode."; exit 1; }
+
+db-status:
+	@test -n "$(DATABASE_URL)" || { echo "ERROR: chưa đặt DATABASE_URL"; exit 1; }
+	@# Tách làm hai bước: PostgreSQL phân tích cả nhánh ELSE của CASE nên gộp vào
+	@# một câu lệnh sẽ gãy ngay lúc parse khi bảng chưa tồn tại.
+	@if [ "$$($(PSQL_RUN) "$(DATABASE_URL)" -tAc \
+	        "SELECT to_regclass('public.customer') IS NOT NULL" 2>/dev/null)" = "t" ]; then \
+		$(PSQL_RUN) "$(DATABASE_URL)" -tAc "SELECT 'Schema OK · khách hàng: ' \
+		  || (SELECT count(*) FROM customer) || ' · giao dịch: ' \
+		  || (SELECT count(*) FROM transaction_history) || ' · fraud case: ' \
+		  || (SELECT count(*) FROM fraud_case)"; \
+	else \
+		echo "Chưa nạp schema — chạy: make db-reset"; \
+	fi
 
 db-reset: db-init db-seed
 

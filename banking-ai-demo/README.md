@@ -182,6 +182,19 @@ make db-test     # chấm engine trên 10 fraud case — cần service đang ch�
 **Chạy trước mỗi lần demo.** Nếu F02 bị chặn thì hệ thống đang cảnh báo sai — lỗi này
 nghiêm trọng hơn việc một case gian lận chỉ đạt `soft_warn`.
 
+## Nạp database khi không có psql
+
+`make` tự dùng `psql` nếu máy có sẵn; nếu không thì chạy qua container
+`postgres:16-alpine`, nên chỉ cần Docker là đủ.
+
+```bash
+export DATABASE_URL='postgresql://anhnv20:PASSWORD@HOST:5432/ea-hackathon?sslmode=require'
+
+make db-ping      # thử kết nối — chạy đầu tiên
+make db-status    # xem đã có schema và dữ liệu chưa
+make db-reset     # nạp schema + 10 khách hàng
+```
+
 ## Cấu hình
 
 Các service đọc thẳng từ biến môi trường, không có file cấu hình nào khác. Xem
