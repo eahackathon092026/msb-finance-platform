@@ -175,7 +175,10 @@ deploy-prep: db-ping db-reset k8s-db-secret k8s-db-check
 # imagePullPolicy IfNotPresent, nên node đã cache :latest từ lần deploy trước sẽ
 # dùng lại bản cũ — pod khởi động lại nhưng vẫn chạy code cũ, và nhìn bên ngoài
 # thì mọi thứ đều "xanh". Gắn thẳng commit SHA làm tag để không có chỗ cho nhầm lẫn.
-DEPLOY_TAG ?= $(shell git rev-parse HEAD)
+# Không dùng HEAD: workflow chỉ chạy khi thư mục service hoặc _common thay đổi, nên
+# một commit chỉ sửa Makefile hay README sẽ KHÔNG có image nào được build. Lấy commit
+# gần nhất thực sự chạm vào code service — đó đúng là tag mà CI đã gắn.
+DEPLOY_TAG ?= $(shell git log -1 --format=%H -- services/ ../.github/workflows/)
 
 redeploy:
 	@echo "Deploy commit $(DEPLOY_TAG)"
