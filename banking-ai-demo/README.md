@@ -275,13 +275,35 @@ nghiệp vụ đều lỗi.
 cũ sẽ dùng lại nó — pod khởi động lại nhưng vẫn chạy code cũ, và nhìn bên ngoài mọi
 thứ đều xanh.
 
-Kiểm tra thủ công:
+### Truy cập sau khi deploy
+
+Cả 5 Service đều là `ClusterIP`, **cố ý không phơi ra Internet**: API chưa có xác
+thực, mà trong đó có những endpoint ghi như `POST /transfer/action` (khóa hoặc hủy
+giao dịch) và `POST /feedback/apply` (ghi đè baseline hành vi). Đường vào là
+port-forward:
+
+```bash
+export KUBECONFIG=~/.kube/vks-finance-demo.yaml
+make port-forward
+```
+
+```
+  customer-profile-service   http://localhost:8081/docs   db=ok
+  transaction-service        http://localhost:8082/docs   db=ok
+  risk-scoring-service       http://localhost:8083/docs   db=ok
+  scam-knowledge-service     http://localhost:8084/docs   db=ok
+  action-feedback-service    http://localhost:8085/docs   db=ok
+```
+
+Cổng trùng với quy ước chạy local, nên cùng một lệnh `curl` dùng được ở cả hai nơi.
 
 ```bash
 make k8s-verify     # image đang chạy + kết nối DB của từng service
-kubectl -n finance-demo port-forward svc/risk-scoring-service 8080:80
-open http://localhost:8080/docs
 ```
+
+Nếu sau này cần agent gọi từ ngoài cluster, đổi `spec.type` sang `LoadBalancer`
+(cluster đã có sẵn `vngcloud-load-balancer-controller`) — nhưng hãy bổ sung xác thực
+trước, đừng mở trần.
 
 Manifest tham chiếu hai đối tượng phải tồn tại trước:
 

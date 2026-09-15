@@ -31,7 +31,7 @@ SCHEMA := ../msb_guardian_schema.sql
 SEED   := db/seed.sql
 
 .PHONY: help test build run sync-common k8s-apply k8s-secret k8s-db-secret \
-        k8s-db-check k8s-verify deploy-prep redeploy \
+        k8s-db-check k8s-verify deploy-prep redeploy port-forward \
         db-init db-seed db-reset db-gen-seed db-test db-ping db-status dev-up dev-down
 
 help:
@@ -61,6 +61,7 @@ help:
 	@echo "  make deploy-prep  - ping DB, nạp schema+seed, tạo secret, kiểm tra từ trong cluster"
 	@echo "  make redeploy     - apply manifest + rollout lại 5 service"
 	@echo "  make k8s-verify   - xem image đang chạy và kết nối DB của từng service"
+	@echo "  make port-forward - mở cả 5 service ra localhost:8081-8085"
 
 # --- Phát triển -------------------------------------------------------------
 # Docker build context là services/<tên> nên mỗi service phải có bản copy riêng
@@ -217,6 +218,39 @@ k8s-verify:
 			print(json.load(urllib.request.urlopen('http://localhost:8080/health/db'))['database'])" \
 			2>/dev/null || echo "không gọi được"; \
 	done
+
+
+# Mở cả 5 service ra localhost cùng lúc. Các Service đều là ClusterIP (cố ý —
+# API chưa có xác thực nên không phơi ra Internet), nên đây là đường vào duy nhất.
+# Cổng trùng với quy ước chạy local để cùng một lệnh curl dùng được ở cả hai nơi.
+PF_BASE ?= 8081
+
+port-forward:
+	@command -v kubectl >/dev/null || { echo "ERROR: không có kubectl"; exit 1; }
+	@kubectl -n $(NAMESPACE) get deploy >/dev/null 2>&1 || { \
+		echo "ERROR: không kết nối được cluster. Đặt KUBECONFIG trước:"; \
+		echo "  export KUBECONFIG=~/.kube/vks-finance-demo.yaml"; exit 1; }
+	@trap 'echo ""; echo "Đang đóng..."; kill 0' INT TERM EXIT; \
+	i=0; \
+	for svc in $(SERVICES); do \
+		port=$$(($(PF_BASE) + $$i)); \
+		kubectl -n $(NAMESPACE) port-forward svc/$$svc $$port:80 >/dev/null 2>&1 & \
+		i=$$((i + 1)); \
+	done; \
+	sleep 4; \
+	echo ""; \
+	i=0; \
+	for svc in $(SERVICES); do \
+		port=$$(($(PF_BASE) + $$i)); \
+		state=$$(curl -s --max-time 3 localhost:$$port/health/db 2>/dev/null \
+		         | sed -n 's/.*"database":"\([a-z]*\)".*/\1/p'); \
+		printf "  %-26s http://localhost:%s/docs   db=%s\n" \
+			"$$svc" "$$port" "$${state:-không phản hồi}"; \
+		i=$$((i + 1)); \
+	done; \
+	echo ""; \
+	echo "  Ctrl+C để đóng tất cả."; \
+	wait
 
 # --- Đóng gói & triển khai --------------------------------------------------
 build: sync-common
