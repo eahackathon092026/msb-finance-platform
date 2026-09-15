@@ -31,6 +31,7 @@ SCHEMA := ../msb_guardian_schema.sql
 SEED   := db/seed.sql
 
 .PHONY: help test build run sync-common k8s-apply k8s-secret k8s-db-secret \
+        k8s-db-check k8s-verify deploy-prep redeploy \
         db-init db-seed db-reset db-gen-seed db-test db-ping db-status dev-up dev-down
 
 help:
@@ -55,6 +56,11 @@ help:
 	@echo "  make k8s-db-secret- tạo secret chứa DATABASE_URL"
 	@echo "  make k8s-secret   - tạo imagePullSecret '$(PULL_SECRET)'"
 	@echo "  make k8s-apply    - apply toàn bộ manifest"
+	@echo ""
+	@echo "Đưa lên VKS lần đầu  (cần DATABASE_URL + KUBECONFIG)"
+	@echo "  make deploy-prep  - ping DB, nạp schema+seed, tạo secret, kiểm tra từ trong cluster"
+	@echo "  make redeploy     - apply manifest + rollout lại 5 service"
+	@echo "  make k8s-verify   - xem image đang chạy và kết nối DB của từng service"
 
 # --- Phát triển -------------------------------------------------------------
 # Docker build context là services/<tên> nên mỗi service phải có bản copy riêng
@@ -139,6 +145,75 @@ dev-up:
 
 dev-down:
 	docker rm -f msb-dev-db 2>/dev/null || true
+
+
+# Kiểm tra database từ BÊN TRONG cluster. Laptop và cluster đi ra Internet bằng
+# hai địa chỉ khác nhau, mà PostgreSQL trên VNG Cloud thường lọc theo IP hoặc VPC —
+# nên "máy tôi kết nối được" không chứng minh được pod cũng kết nối được. Đây là
+# nguyên nhân hay gặp khi pod lên xanh nhưng mọi endpoint nghiệp vụ đều lỗi.
+k8s-db-check:
+	@test -n "$(DATABASE_URL)" || { echo "ERROR: chưa đặt DATABASE_URL"; exit 1; }
+	@echo "Đang thử kết nối database từ trong namespace $(NAMESPACE)..."
+	@kubectl -n $(NAMESPACE) run guardian-db-check-$$$$ \
+		--rm -i --restart=Never --image=$(PSQL_IMAGE) --command -- \
+		psql "$(DATABASE_URL)" -tAc \
+		"SELECT 'Pod kết nối được · ' || current_database()" \
+	|| { echo ""; \
+	     echo "Pod KHÔNG kết nối được tới database."; \
+	     echo "Thường do PostgreSQL chặn IP ra của cluster. Mở whitelist cho địa chỉ"; \
+	     echo "ra Internet của VKS, hoặc đặt database và cluster trong cùng VPC."; \
+	     exit 1; }
+
+# Toàn bộ phần chuẩn bị cho một lần deploy thành công, theo đúng thứ tự phụ thuộc.
+deploy-prep: db-ping db-reset k8s-db-secret k8s-db-check
+	@echo ""
+	@echo "Đã sẵn sàng deploy. Kích hoạt lại CD bằng:  make redeploy"
+
+# Deploy đúng image của commit hiện tại, giống hệt cách CI làm.
+#
+# Không thể chỉ apply manifest rồi rollout restart: manifest để image :latest với
+# imagePullPolicy IfNotPresent, nên node đã cache :latest từ lần deploy trước sẽ
+# dùng lại bản cũ — pod khởi động lại nhưng vẫn chạy code cũ, và nhìn bên ngoài
+# thì mọi thứ đều "xanh". Gắn thẳng commit SHA làm tag để không có chỗ cho nhầm lẫn.
+DEPLOY_TAG ?= $(shell git rev-parse HEAD)
+
+redeploy:
+	@echo "Deploy commit $(DEPLOY_TAG)"
+	kubectl -n $(NAMESPACE) apply -f k8s/config.yaml
+	@for svc in $(SERVICES); do \
+		sed "s#:latest#:$(DEPLOY_TAG)#" k8s/$$(echo $$svc | sed 's/-service$$//').yaml \
+			| kubectl -n $(NAMESPACE) apply -f - || exit 1; \
+	done
+	@for svc in $(SERVICES); do \
+		kubectl -n $(NAMESPACE) rollout status deployment/$$svc --timeout=180s || { \
+			echo ""; \
+			echo "=== $$svc không rollout xong, lý do: ==="; \
+			kubectl -n $(NAMESPACE) describe deployment/$$svc | sed -n '/Conditions/,/Events/p'; \
+			kubectl -n $(NAMESPACE) get pods -l app=$$svc \
+				-o custom-columns='POD:.metadata.name,STATUS:.status.phase,LÝDO:.status.containerStatuses[0].state.waiting.reason'; \
+			echo ""; \
+			echo "ImagePullBackOff nghĩa là image cho commit này chưa có trên vCR —"; \
+			echo "kiểm tra job build-and-push trên GitHub Actions."; \
+			exit 1; }; \
+	done
+	$(MAKE) k8s-verify
+
+# Kiểm tra từng service sau khi deploy: pod chạy image nào, và có thực sự nói
+# chuyện được với database không.
+k8s-verify:
+	@echo ""
+	@echo "=== Image đang chạy ==="
+	@kubectl -n $(NAMESPACE) get deploy \
+		-o custom-columns='SERVICE:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'
+	@echo ""
+	@echo "=== Kết nối database của từng service ==="
+	@for svc in $(SERVICES); do \
+		printf "  %-28s " "$$svc"; \
+		kubectl -n $(NAMESPACE) exec deploy/$$svc -- \
+			python -c "import urllib.request,json; \
+			print(json.load(urllib.request.urlopen('http://localhost:8080/health/db'))['database'])" \
+			2>/dev/null || echo "không gọi được"; \
+	done
 
 # --- Đóng gói & triển khai --------------------------------------------------
 build: sync-common

@@ -254,19 +254,31 @@ vì âm thầm deploy code cũ.
 ### Kubernetes / VKS
 
 ```bash
-# 1. Tạo secret chứa chuỗi kết nối database (chỉ cần làm một lần)
+export KUBECONFIG=~/.kube/vks-finance-demo.yaml
 export DATABASE_URL='postgresql://anhnv20:PASSWORD@DB_HOST:5432/ea-hackathon?sslmode=require'
-make k8s-db-secret
 
-# 2. Nạp credential vCR
-export VCR_USERNAME='<vcr-username>'
-export VCR_PASSWORD='<vcr-password>'
+make deploy-prep    # ping DB → nạp schema+seed → tạo secret → kiểm tra từ trong cluster
+make redeploy       # deploy image của commit hiện tại, rollout, rồi tự xác minh
+```
 
-# 3. Apply toàn bộ
-make k8s-apply
+`deploy-prep` dừng ngay ở bước đầu tiên hỏng, nên bạn biết chính xác vấn đề nằm ở
+đâu thay vì phải đoán từ một pod `CrashLoopBackOff`.
 
-# 4. Kiểm tra
-kubectl -n finance-demo get pods,svc
+Bước `k8s-db-check` đáng chú ý: nó thử kết nối database **từ bên trong namespace**.
+Laptop và cluster đi ra Internet bằng hai địa chỉ khác nhau, mà PostgreSQL trên VNG
+Cloud thường lọc theo IP hoặc VPC — nên "máy tôi kết nối được" không chứng minh được
+pod cũng kết nối được. Đây là nguyên nhân hay gặp khi pod lên xanh nhưng mọi endpoint
+nghiệp vụ đều lỗi.
+
+`redeploy` gắn thẳng commit SHA làm tag image, không dùng `:latest`. Manifest để
+`imagePullPolicy: IfNotPresent`, nên nếu deploy bằng `:latest` thì node đã cache bản
+cũ sẽ dùng lại nó — pod khởi động lại nhưng vẫn chạy code cũ, và nhìn bên ngoài mọi
+thứ đều xanh.
+
+Kiểm tra thủ công:
+
+```bash
+make k8s-verify     # image đang chạy + kết nối DB của từng service
 kubectl -n finance-demo port-forward svc/risk-scoring-service 8080:80
 open http://localhost:8080/docs
 ```
