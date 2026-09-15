@@ -1,0 +1,17 @@
+# Địa chỉ nội bộ giữa 5 service. Trong cùng namespace Kubernetes, tên Service
+# chính là DNS name nên dùng thẳng được. Nếu triển khai mỗi service ở một nơi
+# (ví dụ GreenNode), thay bằng URL công khai tương ứng.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guardian-endpoints
+  namespace: finance-demo
+data:
+  CUSTOMER_PROFILE_SERVICE_URL: "http://customer-profile-service"
+  TRANSACTION_SERVICE_URL: "http://transaction-service"
+  RISK_SCORING_SERVICE_URL: "http://risk-scoring-service"
+  SCAM_KNOWLEDGE_SERVICE_URL: "http://scam-knowledge-service"
+  ACTION_FEEDBACK_SERVICE_URL: "http://action-feedback-service"
+  PEER_TIMEOUT_SECONDS: "5"
+  DB_POOL_MIN: "1"
+  DB_POOL_MAX: "5"

@@ -22,6 +22,17 @@ spec:
           # CI thay :latest bằng commit SHA (xem README).
           image: vcr.vngcloud.vn/114544-ea-hackathon/customer-profile-service:latest
           imagePullPolicy: IfNotPresent
+          env:
+            # Chuỗi kết nối nằm trong Secret, không bao giờ nằm trong manifest.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: guardian-db
+                  key: DATABASE_URL
+          envFrom:
+            # Địa chỉ các service khác + tham số pool kết nối.
+            - configMapRef:
+                name: guardian-endpoints
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -30,19 +41,24 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
+            # /health cố tình không chạm database: nếu probe này phụ thuộc DB thì
+            # một sự cố database sẽ kéo theo việc khởi động lại toàn bộ pod,
+            # biến một sự cố thành hai.
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
+              cpu: 100m
               memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
 ---
 apiVersion: v1
 kind: Service

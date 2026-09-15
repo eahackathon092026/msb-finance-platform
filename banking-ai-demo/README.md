@@ -1,201 +1,305 @@
-# banking-ai-demo
+# MSB AI Financial Guardian — banking-ai-demo
 
-Monorepo demo dùng để test pipeline **CI/CD lên Kubernetes / VKS (VNG Cloud)**, image đẩy lên VNG Container Registry (vCR).
+Năm microservice FastAPI cung cấp API cho agent, phục vụ hai luồng nghiệp vụ:
 
-> Đây là scaffold cơ bản để kiểm thử CI/CD trước. **Không có** database, auth, hay tích hợp LLM ở phase này.
-> Tất cả dữ liệu là mock in-memory và reset khi container restart.
+- **Journey A — Quản lý tài chính cá nhân.** Đọc toàn cảnh tài chính, phân tích chi
+  tiêu theo tháng, dự báo dòng tiền, gợi ý sản phẩm tích lũy.
+- **Journey B — Phòng chống rủi ro thanh toán.** Chấm điểm rủi ro từng lệnh chuyển
+  tiền trước khi tiền rời tài khoản, đối chiếu playbook lừa đảo, hỏi khách, ghi nhận
+  hành động và đưa phản hồi trở lại baseline.
 
-## Services
+Tất cả service dùng PostgreSQL thật theo schema 18 bảng trong
+[`../msb_guardian_schema.sql`](../msb_guardian_schema.sql).
 
-Mỗi service là một ứng dụng FastAPI độc lập, chạy port **8080** trong container.
+## Nguyên tắc thiết kế
 
-| Service | Mục đích | API demo chính |
+**Điểm rủi ro do engine tất định quyết định, không do LLM.** Sáu yếu tố cộng điểm
+theo quy tắc cố định; LLM chỉ được viết phần diễn giải, đặt câu hỏi và làm mượt lời
+khuyên. Nhờ vậy cùng một giao dịch luôn cho ra cùng một điểm, và mọi quyết định đều
+giải thích được bằng con số cụ thể.
+
+**Mọi lời khuyên đưa cho khách đều có gốc trong database.** Câu hỏi và khuyến cáo lấy
+từ bảng `scam_scenario`; LLM không được tự nghĩ ra kịch bản mới hay đổi hành động
+khuyến nghị. Đây là hàng rào chặn việc một câu trả lời sai của LLM đi thẳng tới khách.
+
+**Không endpoint nào trả PII.** Họ tên đầy đủ, số giấy tờ, số điện thoại, email, địa
+chỉ và ngày sinh bị loại khỏi mọi response; chỉ bản đã che được trả ra. Hai cột kiểm
+thử `is_fraud` và `fraud_case_id` cũng bị loại. Response an toàn để đưa thẳng vào
+prompt LLM.
+
+**Mỗi service chỉ chạm bảng của chính nó.** Dữ liệu thuộc service khác lấy qua HTTP,
+không truy vấn chéo database.
+
+## Năm service
+
+| Service | Bảng sở hữu | Vai trò |
 |---|---|---|
-| `customer-profile-service` | Customer profile: persona, behavior baseline, beneficiaries, digital twin | `GET /customers/{id}`, `GET /customers/{id}/baseline` |
-| `transaction-service` | Lịch sử giao dịch: categorize, monthly summary, cashflow forecast | `GET /transactions/{id}`, `.../monthly-summary`, `.../cashflow-forecast` |
-| `risk-scoring-service` | Risk score deterministic 0-100 từ ~6 factor | `POST /risk-score` |
-| `scam-knowledge-service` | Lookup + match ~10 kịch bản scam phổ biến tại VN | `GET /scams`, `POST /scams/match` |
-| `action-feedback-service` | Ghi nhận action (CANCEL/HOLD/CONTACT/CASE_OPEN/ALERT) và feedback | `POST /actions`, `GET /actions/{id}`, `POST /feedback` |
+| `customer-profile-service` | `customer`, `account`, `deposit`, `loan`, `beneficiary`, `behavior_profile`, `account_event` | Khách hàng là ai và bình thường họ hành xử ra sao |
+| `transaction-service` | `transaction_history`, `spending_insight`, `product`, `product_recommendation` | Lịch sử giao dịch, phân tích chi tiêu, gợi ý sản phẩm |
+| `risk-scoring-service` | `risk_decision`, view `ops_summary`, `ops_decision_log` | Engine 6 yếu tố và vòng đời quyết định |
+| `scam-knowledge-service` | `scam_scenario`, `fraud_case` | Playbook lừa đảo và bộ kiểm thử engine |
+| `action-feedback-service` | `guardian_case`, `feedback`, `notification`, `llm_trace` | Case, phản hồi closed-loop, thông báo, nhật ký LLM |
 
-Mỗi service đều có: `GET /health` → `{"status":"ok","service":"<name>"}` và `GET /info` (mô tả service).
+Mỗi service đều có:
 
-## Sơ đồ luồng
+| Đường dẫn | Nội dung |
+|---|---|
+| `GET /docs` | **Swagger UI** — có mô tả cho từng nhóm endpoint, thử được trực tiếp |
+| `GET /redoc` | Tài liệu dạng đọc |
+| `GET /openapi.json` | Đặc tả OpenAPI 3.1 |
+| `GET /agent/tools` | Manifest cho agent: tên tool, mô tả, tham số, kiểu trả về |
+| `GET /health` | Kiểm tra sống — **không chạm database**, để sự cố DB không làm Kubernetes khởi động lại pod |
+| `GET /health/db` | Kiểm tra kết nối database |
+| `GET /info` | Mô tả service và danh sách bảng sở hữu |
+| `GET /` | Trang chỉ đường tới các mục trên |
+
+## Engine rủi ro
+
+Sáu yếu tố, mỗi yếu tố có trần điểm riêng; tổng bị chặn ở 100.
+
+| Yếu tố | Trần | Nội dung |
+|---|---:|---|
+| `amount_deviation` | 25 | Số tiền lệch bao xa so với p90/p99/mức cao nhất từng chuyển, và có đang vét sạch tài khoản không |
+| `new_beneficiary` | 20 | Người nhận hoàn toàn mới, mới quen, hay đã quen lâu |
+| `time_of_day` | 10 | Giao dịch ban đêm — chỉ tính là bất thường với người vốn không giao dịch đêm |
+| `behavior_drift` | 20 | Cờ chiếm quyền thiết bị, tổng dồn về một người nhận, chuỗi giao dịch tăng dần |
+| `relationship_history` | 15 | Quan hệ với người nhận, tiền mồi, trạng thái nghi ngờ |
+| `recent_context` | 20 | Sự kiện trong **60 phút trước giao dịch**: tất toán sổ, nâng hạn mức, đăng nhập thiết bị mới, đổi mật khẩu, nhận tiền lạ |
+
+Phân mức: `pass` dưới 40 · `soft_warn` 40–74 · `intervene` từ 75.
+
+Sáu yếu tố chỉ nhìn hành vi, không đọc khách đang chuyển tiền để làm gì. Vì vậy có
+thêm một cơ chế **nâng mức**: khi nội dung chuyển khoản khớp một kịch bản trong
+playbook bằng bằng chứng từ khóa, *và* playbook xếp kịch bản đó vào loại phải dừng
+giao dịch (`cancel`/`hold`), thì `soft_warn` được nâng lên `intervene`. Cơ chế này
+không cộng điểm (nên kẻ gian đổi nội dung chuyển khoản không kéo được điểm xuống),
+không bao giờ nâng từ `pass`, và luôn được ghi lại trong `factors.scenario_escalation`
+để truy vết.
+
+### Vòng đời một lệnh chuyển tiền
+
+Một lệnh chuyển = một dòng `risk_decision`, cả ba bước ghi lên cùng dòng đó:
 
 ```
-customer-profile ──▶ transaction ──▶ risk-scoring ──▶ scam-knowledge ──▶ action-feedback
-   (profile)         (lịch sử GD)     (tính điểm)      (match kịch bản)     (hành động + feedback)
+POST /transfer/precheck    → chấm điểm, khớp kịch bản, trả câu hỏi nếu cần
+POST /transfer/intervene   → ghi câu trả lời của khách, trả khuyến cáo
+POST /transfer/action      → chốt hành động, mở case nếu khóa tạm hoặc gọi lại
 ```
 
-Luồng ý tưởng: lấy profile khách hàng → xem giao dịch → chấm điểm rủi ro → đối chiếu kịch bản scam → quyết định hành động & ghi nhận feedback.
+Sau đó vòng phản hồi khép lại: đóng case bằng `CLOSED_FRAUD`/`CLOSED_LEGIT` tự sinh
+nhãn, `POST /feedback/apply` áp nhãn đó vào baseline và trạng thái người nhận.
+
+## Dữ liệu mẫu
+
+`db/seed.sql` sinh từ `db/generate_seed.py` (tất định — chạy lại cho ra đúng cùng bộ
+dữ liệu). Nội dung:
+
+- **10 khách hàng** phủ đủ ba phân khúc T24: 4 SALARY (`target=1`), 3 HNW (`target=2`),
+  3 SENIOR (`target=3`). Người từ 60 tuổi luôn được xếp SENIOR bất kể `target`.
+- **~2.700 giao dịch** trải 6 tháng gần nhất, với chữ ký chi tiêu khác nhau theo phân
+  khúc: người đi làm nhiều giao dịch nhỏ, khách ưu tiên ít giao dịch nhưng giá trị
+  lớn, người cao tuổi rất ít giao dịch quanh vài nhóm quen thuộc.
+- **106 người nhận**, tài khoản, sổ tiết kiệm, khoản vay, và `behavior_profile` tính
+  từ chính các giao dịch sạch trong 90 ngày.
+- **10 kịch bản lừa đảo** (S01–S10) theo 5 nhóm: mạo danh, deepfake, đầu tư/việc làm,
+  mua bán, chiếm thiết bị.
+- **10 fraud case** (F01–F10) làm bộ kiểm thử engine, kèm quyết định rủi ro, case,
+  phản hồi, thông báo và nhật ký LLM.
+
+**Cặp F01/F02 là bằng chứng quan trọng nhất khi pitch.** Cùng một khách hàng cao tuổi,
+cùng chuyển một khoản lớn bất thường so với thói quen:
+
+| | F01 | F02 |
+|---|---|---|
+| Số tiền | 560.000.000 | 60.000.000 |
+| Người nhận | Hoàn toàn mới, quan hệ chưa xác định | Con gái, đã chuyển 28 lần |
+| Bối cảnh | Tất toán sổ tiết kiệm 28 phút trước | Không có gì bất thường |
+| Engine chấm | **93 → intervene** | **29 → pass** |
+
+Chặn nhầm một giao dịch hợp lệ là lỗi tệ hơn bỏ lọt một vụ lừa đảo, nên F02 phải luôn
+đi qua được.
+
+## Chạy local
+
+Cần Python 3.12+ và Docker.
+
+```bash
+# 1. Dựng Postgres + nạp schema + nạp dữ liệu mẫu
+make dev-up
+export DATABASE_URL='postgresql://postgres:guardian@localhost:5432/guardian'
+
+# 2. Chạy 1 service
+make run SERVICE=risk-scoring-service PORT=8083
+# → http://localhost:8083/docs
+```
+
+Chạy cả 5 service (mỗi lệnh một cửa sổ terminal):
+
+```bash
+export DATABASE_URL='postgresql://postgres:guardian@localhost:5432/guardian'
+export CUSTOMER_PROFILE_SERVICE_URL=http://localhost:8081
+export TRANSACTION_SERVICE_URL=http://localhost:8082
+export RISK_SCORING_SERVICE_URL=http://localhost:8083
+export SCAM_KNOWLEDGE_SERVICE_URL=http://localhost:8084
+export ACTION_FEEDBACK_SERVICE_URL=http://localhost:8085
+
+make run SERVICE=customer-profile-service PORT=8081
+make run SERVICE=transaction-service      PORT=8082
+make run SERVICE=risk-scoring-service     PORT=8083
+make run SERVICE=scam-knowledge-service   PORT=8084
+make run SERVICE=action-feedback-service  PORT=8085
+```
+
+### Thử nhanh
+
+```bash
+# Journey A — chi tiêu theo tháng
+curl -s localhost:8082/transactions/100001/monthly-summary | jq
+
+# Journey A — toàn cảnh tài chính
+curl -s localhost:8081/customers/100007/portfolio | jq .summary
+
+# Journey B — chấm một lệnh chuyển tiền
+curl -s -X POST localhost:8083/transfer/precheck \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_id":100008,"account_id":5011,"amount":560000000,
+       "beneficiary_bank_code":"ACB","beneficiary_account_no":"5270384262",
+       "memo":"CHUYEN TIEN THEO YEU CAU CO QUAN DIEU TRA",
+       "session_flags":{"on_call":true}}' | jq
+
+# Manifest cho agent
+curl -s localhost:8083/agent/tools | jq '.tools[].name'
+```
+
+## Kiểm thử
+
+```bash
+make test        # pytest cho cả 5 service — không cần database
+make db-test     # chấm engine trên 10 fraud case — cần service đang chạy
+```
+
+`make db-test` in ra bảng điểm từng case và ghi kết quả vào `fraud_case.last_test_score`.
+**Chạy trước mỗi lần demo.** Nếu F02 bị chặn thì hệ thống đang cảnh báo sai — lỗi này
+nghiêm trọng hơn việc một case gian lận chỉ đạt `soft_warn`.
+
+## Cấu hình
+
+Các service đọc thẳng từ biến môi trường, không có file cấu hình nào khác. Xem
+[`.env.example`](.env.example) cho danh sách đầy đủ.
+
+| Biến | Bắt buộc | Nội dung |
+|---|:---:|---|
+| `DATABASE_URL` | ✓ | Chuỗi kết nối PostgreSQL. Hoặc dùng bộ `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` |
+| `*_SERVICE_URL` | ✓ | Địa chỉ 4 service còn lại. **Bắt buộc khi mỗi service deploy một nơi** (GreenNode); trong cùng namespace Kubernetes thì tên service là đủ |
+| `PEER_TIMEOUT_SECONDS` | | Thời gian chờ khi gọi service khác, mặc định 5 |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | | Kích thước pool kết nối, mặc định 1/5 |
+| `PUBLIC_BASE_URL` | | Địa chỉ công khai của chính service, để nút "Try it out" trên Swagger gọi đúng chỗ khi đứng sau ingress |
+
+Khi một service không gọi được service khác, endpoint chính **vẫn trả kết quả** trên
+phần dữ liệu lấy được và đánh dấu trong trường `degraded`, thay vì trả lỗi. Thà cảnh
+báo thiếu ngữ cảnh còn hơn để một giao dịch đi qua mà không ai chấm.
 
 ## Cấu trúc repo
 
-`.github/workflows/` nằm ở **gốc git repo** (cấp trên `banking-ai-demo/`) để GitHub Actions đọc được; path filter trỏ vào `banking-ai-demo/services/<name>/**`.
+`.github/workflows/` nằm ở **gốc git repo** (cấp trên `banking-ai-demo/`) để GitHub
+Actions đọc được.
 
 ```
 <repo-root>/
-  .github/workflows/            (1 workflow build image / service)
+  msb_guardian_schema.sql        schema 18 bảng
+  .github/workflows/             1 workflow / service: test → build → deploy
   banking-ai-demo/
     services/
-      customer-profile-service/   (main.py, requirements.txt, Dockerfile, tests/)
-      transaction-service/
-      risk-scoring-service/
-      scam-knowledge-service/
-      action-feedback-service/
+      _common/common.py          bản gốc của lớp dùng chung
+      <tên>-service/
+        main.py  common.py  requirements.txt  Dockerfile  tests/
+    db/
+      generate_seed.py           sinh dữ liệu mẫu (tất định)
+      seed.sql                   kết quả đã sinh sẵn
+      run_fraud_tests.py         chấm engine trên 10 fraud case
     k8s/
-      namespace.yaml
-      customer-profile.yaml
-      transaction.yaml
-      risk-scoring.yaml
-      scam-knowledge.yaml
-      action-feedback.yaml
-    Makefile
-    README.md
+      namespace.yaml  config.yaml  db-secret.example.yaml
+      <tên>.yaml                 Deployment + Service từng service
+    Makefile  .env.example  README.md
 ```
 
-## Chạy từng service local
+### Về `common.py`
 
-Cần Python 3.11+.
+Docker build context là `services/<tên>` nên mỗi service phải có bản copy riêng của
+`common.py`. Bản gốc duy nhất được sửa là `services/_common/common.py`; sau khi sửa
+phải chạy:
 
 ```bash
-cd services/customer-profile-service
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8080
-# → http://localhost:8080/health
-# → http://localhost:8080/docs  (Swagger UI)
+make sync-common
 ```
 
-Hoặc dùng Makefile (chạy 1 service, mặc định customer-profile-service):
+CI có bước kiểm tra bản copy chưa bị lệch — nếu quên đồng bộ, build sẽ báo lỗi thay
+vì âm thầm deploy code cũ.
+
+## Triển khai
+
+### Kubernetes / VKS
 
 ```bash
-make run                                  # customer-profile-service @ 8080
-make run SERVICE=risk-scoring-service      # service khác
-make run SERVICE=transaction-service PORT=8082
-```
+# 1. Tạo secret chứa chuỗi kết nối database (chỉ cần làm một lần)
+export DATABASE_URL='postgresql://anhnv20:PASSWORD@DB_HOST:5432/ea-hackathon?sslmode=require'
+make k8s-db-secret
 
-Ví dụ gọi thử:
-
-```bash
-curl localhost:8080/customers/C001
-curl -X POST localhost:8080/risk-score \
-  -H 'Content-Type: application/json' \
-  -d '{"customer_id":"C001","amount":50000000,"new_beneficiary":true,"unusual_time":true,"geo_anomaly":true}'
-```
-
-## Test
-
-```bash
-make test          # chạy pytest cho tất cả service
-```
-
-Hoặc từng service:
-
-```bash
-cd services/risk-scoring-service
-pip install -r requirements.txt
-python -m pytest -q
-```
-
-## Build Docker
-
-```bash
-# Build tất cả, tag = short commit SHA
-make build
-
-# Build 1 service thủ công
-docker build -t customer-profile-service:dev services/customer-profile-service
-docker run -p 8080:8080 customer-profile-service:dev
-```
-
-Image được build với registry mặc định `vcr.vngcloud.vn/114544-ea-hackathon` (VNG Container Registry) — override khi cần:
-
-```bash
-make build REGISTRY=vcr.vngcloud.vn/<your-project> TAG=$(git rev-parse --short HEAD)
-```
-
-## Deploy lên Kubernetes / VKS
-
-vCR là **private registry**, nên VKS cần một `imagePullSecret` (tên `vcr-cred`) để kéo image. Tất cả Deployment đã tham chiếu sẵn secret này.
-
-```bash
-# 1. Nạp credential vCR qua biến môi trường (KHÔNG commit vào repo)
+# 2. Nạp credential vCR
 export VCR_USERNAME='<vcr-username>'
 export VCR_PASSWORD='<vcr-password>'
 
-# 2. Tạo namespace + imagePullSecret + apply toàn bộ manifest
+# 3. Apply toàn bộ
 make k8s-apply
-#   k8s-apply sẽ: tạo namespace → tạo secret 'vcr-cred' (make k8s-secret) → kubectl apply -f k8s/
 
-# 3. Kiểm tra
+# 4. Kiểm tra
 kubectl -n finance-demo get pods,svc
-
-# 4. Thử 1 service qua port-forward
-kubectl -n finance-demo port-forward svc/customer-profile-service 8080:80
-curl localhost:8080/health
+kubectl -n finance-demo port-forward svc/risk-scoring-service 8080:80
+open http://localhost:8080/docs
 ```
 
-Tạo/rotate riêng imagePullSecret (không apply manifest):
+Manifest tham chiếu hai đối tượng phải tồn tại trước:
 
-```bash
-make k8s-secret VCR_USERNAME='<vcr-username>' VCR_PASSWORD='<vcr-password>'
-```
+- Secret `guardian-db` chứa `DATABASE_URL` — tạo bằng `make k8s-db-secret`, **không
+  bao giờ commit vào repo**
+- ConfigMap `guardian-endpoints` chứa địa chỉ các service — `k8s/config.yaml`
 
-Mỗi manifest gồm: `Deployment` (có `imagePullSecrets: vcr-cred`) + `Service` (ClusterIP), `readinessProbe` và `livenessProbe` trỏ tới `/health`, requests/limits CPU/RAM nhỏ cho demo. Namespace chung: **`finance-demo`**.
+### GreenNode (mỗi service một nơi)
 
-### Cập nhật image tag (commit SHA)
+Các service không phụ thuộc vào DNS nội bộ của Kubernetes. Với mỗi service, đặt:
 
-Manifest để `image: ...:latest`. Trong CI (sau khi push image), cập nhật deployment sang đúng commit SHA — ví dụ:
+- `DATABASE_URL` trỏ tới PostgreSQL dùng chung
+- Bốn biến `*_SERVICE_URL` trỏ tới URL công khai của các service còn lại
+- `PUBLIC_BASE_URL` trỏ tới chính nó, để Swagger "Try it out" gọi đúng địa chỉ
 
-```bash
-kubectl -n finance-demo set image \
-  deployment/customer-profile-service \
-  customer-profile-service=vcr.vngcloud.vn/114544-ea-hackathon/customer-profile-service:$GITHUB_SHA
-```
+### CI/CD
 
-## CI/CD (GitHub Actions → vCR → VKS)
+Mỗi service có một workflow tại `<repo-root>/.github/workflows/<tên>.yml`, chạy khi
+thư mục service đó **hoặc** `services/_common/` thay đổi. Ba job nối tiếp:
 
-Mỗi service có 1 workflow trong `<repo-root>/.github/workflows/<service>.yml`, chỉ chạy khi folder service đó thay đổi — path filter là `banking-ai-demo/services/<name>/**`. Mỗi workflow gồm 2 job:
+1. **`test`** — kiểm tra `common.py` chưa lệch khỏi bản gốc, rồi chạy pytest
+2. **`build-and-push`** — build image, push lên vCR với hai tag `:<commit SHA>` và `:latest`
+3. **`deploy`** — apply ConfigMap, kiểm tra secret `guardian-db` tồn tại, rồi rollout
 
-**Job `build-and-push`:**
-1. Đăng nhập vCR tại host `vcr.vngcloud.vn`.
-2. Build Docker image.
-3. Push vào project `114544-ea-hackathon` với **2 tag**: `:<commit SHA>` (chính) và `:latest`.
+Credentials đặt trong GitHub Secrets:
 
-**Job `deploy`** (chạy sau khi build xong):
-1. Ghi kubeconfig từ secret `KUBE_CONFIG` (base64).
-2. Đảm bảo `imagePullSecret` `vcr-cred` trong namespace `finance-demo`.
-3. Apply manifest với image đã gắn đúng commit SHA rồi `kubectl rollout status` chờ deploy xong.
-
-Host (`vcr.vngcloud.vn`), project (`114544-ea-hackathon`), namespace (`finance-demo`) để thẳng trong workflow/manifest (không phải secret). Chỉ **credentials** đưa vào GitHub Secrets (Settings → Secrets and variables → Actions):
-
-| Secret | Ý nghĩa |
+| Secret | Nội dung |
 |---|---|
-| `VCR_USERNAME` | Username / access key đăng nhập vCR |
-| `VCR_PASSWORD` | Password / secret key vCR |
-| `KUBE_CONFIG` | Kubeconfig VKS **đã base64** (xem dưới) — dùng để deploy |
-
-Tạo secret `KUBE_CONFIG` từ file kubeconfig tải về từ VNG Cloud:
+| `VCR_USERNAME` | Username đăng nhập vCR |
+| `VCR_PASSWORD` | Password vCR |
+| `KUBE_CONFIG` | Kubeconfig VKS đã base64 |
 
 ```bash
-# macOS/Linux — copy chuỗi base64 rồi dán vào GitHub secret KUBE_CONFIG
 base64 -i ~/.kube/vks-finance-demo.yaml | pbcopy      # macOS
-base64 -w0 ~/.kube/vks-finance-demo.yaml              # Linux (in ra stdout)
-
-# hoặc set thẳng bằng gh CLI:
 gh secret set KUBE_CONFIG < <(base64 -w0 ~/.kube/vks-finance-demo.yaml)
 ```
 
-> Kubeconfig chứa credential truy cập cluster → **không commit vào repo** (đã có trong `.gitignore`). Job `deploy` giả định namespace `finance-demo` đã tồn tại (bạn đã tạo sẵn).
+## Giới hạn hiện tại
 
-Image path đầy đủ: `vcr.vngcloud.vn/114544-ea-hackathon/<service>:<commit SHA>`.
-
-> **Lưu ý vị trí `.github`:** GitHub Actions chỉ đọc `.github/workflows` ở **gốc git repo**. Repo này đã đặt `.github/` ở gốc repo (`msb-finance-platform/.github/`), path filter là `banking-ai-demo/services/<name>/**` và build context là `banking-ai-demo/services/<name>`. Nếu sau này tách `banking-ai-demo/` thành repo riêng, đổi lại path filter thành `services/<name>/**` và context `services/<name>`.
-
-## Không thuộc phase này
-
-- ❌ Database (dữ liệu mock in-memory)
-- ❌ Authentication / Authorization
-- ❌ Tích hợp LLM
-
-Mục tiêu hiện tại: scaffold đơn giản để test CI/CD build → push → deploy VKS trước.
+- Chưa có xác thực / phân quyền trên API. Trong phạm vi hackathon các service chạy
+  trong mạng tin cậy; trước khi đưa ra ngoài phải bổ sung.
+- `notification` là kênh mock, chỉ ghi vào database chứ chưa thực sự gửi đi.
+- Chưa tích hợp LLM. Các trường `llm_reasons`, `advice_body`, `insight_text` nhận nội
+  dung do bên gọi truyền vào; `llm_trace` đã sẵn sàng để ghi nhật ký mọi lượt gọi.
+- `fraud_case` chứa đáp án kỳ vọng của bộ kiểm thử nên **không được expose** ra ứng
+  dụng khách hàng.
